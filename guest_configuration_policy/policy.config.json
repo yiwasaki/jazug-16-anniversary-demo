@@ -1,0 +1,11 @@
+{
+  "policyDefinitionName": "gc-machine-baseline",
+  "policyAssignmentName": "gc-machine-baseline",
+  "policyDisplayName": "Guest Configuration - MachineBaseline ApplyAndAutoCorrect",
+  "policyDescription": "Ubuntu VM に MachineBaseline を ApplyAndAutoCorrect で適用する Guest Configuration カスタム Policy",
+  "policyId": "834f124d-b8f5-4a9d-9d10-cfeeafcd92dd",
+  "policyVersion": "1.0.0",
+  "configurationName": "MachineBaseline",
+  "configurationVersion": "1.0.0",
+  "managedFilePath": "/tmp/machine-baseline.txt"
+}

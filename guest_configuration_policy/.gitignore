@@ -1,0 +1,8 @@
+# build 中間物・生成物
+.bicep-build/
+generated/
+package/*.zip
+
+# 一時 parameters
+main.parameters.json
+policy.parameters.json

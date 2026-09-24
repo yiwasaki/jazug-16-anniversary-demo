@@ -4,7 +4,7 @@
 
 この方式と [../guest_configuration_policy/README.md](../guest_configuration_policy/README.md) のPolicy方式は代替関係です。同じVMへ同じ構成を同時にデプロイしないでください。方式を切り替える場合は、現在の方式をcleanupしてから次の方式をデプロイします。
 
-## 前提条件
+## 1. 前提条件
 
 - [../prepare/README.md](../prepare/README.md) の手順に従い、Azure基盤のデプロイを完了してください。
 - コマンドを実行する端末にPowerShell 7を用意してください。
@@ -28,7 +28,7 @@ Connect-AzAccount
 Set-AzContext -Subscription '<subscription-id-or-name>'
 ```
 
-## デプロイ
+## 2. デプロイ
 
 リポジトリルートでprepare deploymentのoutputsを取得します。
 
@@ -45,7 +45,7 @@ $packageBaseUri = $prepareOutputs.packageBaseUri.value.TrimEnd('/')
 $packageUploaderPrincipalId = $prepareOutputs.packageUploaderPrincipalId.value
 ```
 
-### 1-4. Guest Configuration packageをbuild
+### 2.1. Guest Configuration packageをbuild（手順1-4）
 
 DSC構成をcompileし、Guest Configuration packageをbuildします。
 
@@ -135,7 +135,7 @@ $contentUri = "$packageBaseUri/$packageFileName"
 Remove-Item -Path ./guest_configuration_assignment/.bicep-build -Recurse -Force
 ```
 
-### 5. packageをStorageへupload
+### 2.2. packageをStorageへupload（手順5）
 
 Storageを実行端末のpublic IPだけに一時開放し、packageをuploadしたら再閉鎖します。
 
@@ -149,7 +149,7 @@ Storageを実行端末のpublic IPだけに一時開放し、packageをuploadし
   -PackageUploaderPrincipalId $packageUploaderPrincipalId
 ```
 
-### 6. Extensionと直接Assignmentをdeploy
+### 2.3. Extensionと直接Assignmentをdeploy（手順6）
 
 Guest Configuration Extensionと直接Assignmentをdeployします。
 
@@ -172,7 +172,7 @@ New-AzResourceGroupDeployment `
   -SkipTemplateParameterPrompt | Out-Null
 ```
 
-## 検証
+## 3. 検証
 
 初回評価には時間がかかる場合があります。`complianceStatus` が空の場合は数分後に再実行します。
 
@@ -192,7 +192,7 @@ pwsh ./guest_configuration_assignment/scripts/test-drift.ps1 `
   -VmName $vmName
 ```
 
-## クリーンアップ
+## 4. クリーンアップ
 
 直接AssignmentとGuest Configuration Extensionだけを削除します。VM、Storage、packageは残ります。
 
@@ -204,7 +204,7 @@ pwsh ./guest_configuration_assignment/scripts/cleanup.ps1 `
 
 Extensionを残す場合は `-KeepExtension` を追加します。基盤も削除する場合は、上記の完了後に `prepare/scripts/cleanup.ps1` を実行します。
 
-## 設計上の注意
+## 5. 設計上の注意
 
 - `assignment.config.json` は構成名、version、Assignment名、実行モード、管理対象pathの基準です。
 - package filename、Blob上のfilename、Assignmentの `contentHash` は同じbuild結果を使用します。
