@@ -51,6 +51,7 @@ guest_configuration_policy/
 - サブスクリプションスコープでのPolicy definition作成と、対象Resource Groupでのデプロイ・ロール割り当てに必要な権限を用意してください。
 
 ```powershell
+# 必要なPowerShellモジュールを、現在のユーザー向けにインストールします。
 Install-Module -Name Az -Scope CurrentUser -Repository PSGallery -Force
 Install-Module -Name GuestConfiguration -Scope CurrentUser -Force
 Install-Module -Name PSDesiredStateConfiguration `
@@ -58,6 +59,7 @@ Install-Module -Name PSDesiredStateConfiguration `
   -AllowPrerelease `
   -Scope CurrentUser
 
+# Azureへログインし、この後の操作で使用するサブスクリプションを選択します。
 Connect-AzAccount
 Set-AzContext -Subscription '<subscription-id-or-name>'
 ```
@@ -73,12 +75,14 @@ prepare deploymentのoutputs取得、DSC packageのbuild、Storageへのupload�
 リポジトリルートでPowerShellを開き、prepare deploymentのoutputsを取得します。
 
 ```powershell
-$resourceGroupName = 'rg-gcpolicy'
+# prepareで作成したResource Groupと、デプロイ結果のoutputsを取得します。
+$resourceGroupName = 'rg-gcpolicy-policy'
 $location = (Get-AzResourceGroup -Name $resourceGroupName).Location
 $prepareOutputs = (Get-AzResourceGroupDeployment `
   -ResourceGroupName $resourceGroupName `
   -Name 'gcpolicy-prepare').Outputs
 
+# VM名、packageのupload先、uploadに使用するidentityのprincipal IDを取り出します。
 $vmName = $prepareOutputs.vmName.value
 $storageAccountName = $prepareOutputs.storageAccountName.value
 $containerName = $prepareOutputs.packageContainerName.value
@@ -96,16 +100,26 @@ $policyConfig = Get-Content ./guest_configuration_policy/policy.config.json -Raw
 $configurationName = $policyConfig.configurationName
 $configurationVersion = $policyConfig.configurationVersion
 
-# DSC構成をcompileし、localhost.mofを生成します。
+# 前回の一時ファイルを削除し、MOFの出力先を作成します。
 $mofOutputPath = "./guest_configuration_policy/.bicep-build/$configurationName"
 Remove-Item -Path ./guest_configuration_policy/.bicep-build -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -Path $mofOutputPath -ItemType Directory -Force | Out-Null
 
+# DSC engineに、このrepository内のcustom DSC resourceを読み込ませます。
 Import-Module PSDesiredStateConfiguration -RequiredVersion 3.0.0 -Force
 $modulePath = (Resolve-Path ./guest_configuration_policy/configuration/modules).Path
 $env:PSModulePath = "$modulePath$([IO.Path]::PathSeparator)$env:PSModulePath"
+
+# 先頭の「. と空白」はdot-sourceです。ファイル内の構成定義を現在のPowerShellセッションへ読み込みます。
+# Configuration MachineBaseline と定義されているため、MachineBaselineという名前で呼び出せるようになります。
+# 名前はファイル名ではなくConfigurationの定義で決まり、Azureへの登録やインストールではありません。
 . ./guest_configuration_policy/configuration/MachineBaseline.ps1
 
+# Configurationは通常のfunctionと異なり、呼び出すとDSCが構成をコンパイルします。
+# 引数を構成へ当てはめ、リソースのプロパティや型を検証し、NodeごとのMOFを生成します。
+# MOF（Managed Object Format）は、使用するDSCリソースと期待する状態を記述したファイルです。
+# Node localhost の定義により出力名はlocalhost.mofとなり、DSCが用意する-OutputPathで出力先を指定します。
+# この段階ではSet()は呼ばれず、VMも変更されません。状態の確認・修正は配布後にVM内で行われます。
 MachineBaseline `
   -ManagedFilePath $policyConfig.managedFilePath `
   -OutputPath $mofOutputPath
@@ -124,9 +138,11 @@ $packageFileName = "${configurationName}_${configurationVersion}.zip"
 $packagePath = "./guest_configuration_policy/package/$packageFileName"
 Move-Item -Path $generatedPackage.Path -Destination $packagePath -Force
 
+# 配布するZIPのhashとURIを、Policy JSONの生成と検証でも使用します。
 $packageHash = (Get-FileHash -Path $packagePath -Algorithm SHA256).Hash
 $contentUri = "$packageBaseUri/$packageFileName"
 
+# compile時に使用した一時ファイルを削除します。
 Remove-Item -Path ./guest_configuration_policy/.bicep-build -Recurse -Force
 ```
 
@@ -135,6 +151,8 @@ Remove-Item -Path ./guest_configuration_policy/.bicep-build -Recurse -Force
 Storageを実行端末のpublic IPだけに一時開放し、packageをuploadしたら必ず再閉鎖します。
 
 ```powershell
+# Azure PowerShellでZIP packageをBlob Storageへuploadします。
+# スクリプト内で実行端末向けの一時アクセスを設定し、upload後に再閉鎖します。
 ./guest_configuration_policy/scripts/publish-package.ps1 `
   -ResourceGroupName $resourceGroupName `
   -StorageAccountName $storageAccountName `
@@ -152,6 +170,8 @@ Storageを実行端末のpublic IPだけに一時開放し、packageをuploadし
 対象VMへGuest Configuration Extensionをデプロイします。
 
 ```powershell
+# VM内で構成を評価・適用するGuest Configuration Extensionをインストールします。
+# このコマンドでは、packageを指定するGuest Configuration Assignmentはまだ作成しません。
 Set-AzVMExtension `
   -ResourceGroupName $resourceGroupName `
   -VMName $vmName `
@@ -170,10 +190,15 @@ Set-AzVMExtension `
 `New-GuestConfigurationPolicy` はローカルのZIPからSHA-256 hashを計算し、Policy definition用のJSONへ埋め込みます。生成されたhashがupload済みpackageのhashと一致することも確認します。
 
 ```powershell
+# 前回生成したPolicy JSONを削除し、今回の出力先を作成します。
 $generatedPath = './guest_configuration_policy/generated'
 Remove-Item -Path $generatedPath -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -Path $generatedPath -ItemType Directory -Force | Out-Null
 
+# upload先のURIとローカルのZIPから、DeployIfNotExistsのPolicy JSONを生成します。
+# ApplyAndAutoCorrectは構成の適用後もドリフトを自動修復するモードです。
+# UseSystemAssignedIdentityは、package取得に対象VMのsystem-assigned identityを使用する指定です。
+# Policy assignmentのidentityとは別であり、この後の割り当て時に作成するものではありません。
 New-GuestConfigurationPolicy `
   -PolicyId ([guid]$policyConfig.policyId) `
   -ContentUri $contentUri `
@@ -187,6 +212,7 @@ New-GuestConfigurationPolicy `
   -UseSystemAssignedIdentity `
   -ExcludeArcMachines | Out-Null
 
+# 生成されたJSONを読み込み、packageのhashが意図したbuild結果と一致することを確認します。
 $policyFile = (Resolve-Path "$generatedPath/${configurationName}_DeployIfNotExists.json").Path
 $policyJson = Get-Content -Path $policyFile -Raw | ConvertFrom-Json
 $generatedContentHash = $policyJson.properties.metadata.guestConfiguration.contentHash
@@ -203,6 +229,7 @@ if ($generatedContentHash -ine $packageHash) {
 生成したJSONをCustom Policy definitionとしてサブスクリプションへ登録します。
 
 ```powershell
+# JSONをサブスクリプションへ登録します。この段階では対象Resource Groupへの割り当ては行いません。
 $policyDefinition = New-AzPolicyDefinition `
   -Name $policyConfig.policyDefinitionName `
   -Policy $policyFile
@@ -213,9 +240,12 @@ $policyDefinition = New-AzPolicyDefinition `
 対象Resource Groupのresource IDを作成し、system-assigned identity付きでPolicy definitionを割り当てます。`EnableAutoRemediation` は生成されるPolicy definitionの既定値が `false` のため、`true` を明示します。
 
 ```powershell
+# 現在のサブスクリプションとResource Groupから、Policyの適用範囲を組み立てます。
 $subscriptionId = (Get-AzContext).Subscription.Id
 $assignmentScope = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName"
 
+# Policyを割り当て、remediationでデプロイを実行するためのidentityを作成します。
+# EnableAutoRemediationは生成されたPolicyのパラメーターです。既存VM向けのremediation taskは別途開始します。
 $policyAssignment = New-AzPolicyAssignment `
   -Name $policyConfig.policyAssignmentName `
   -Scope $assignmentScope `
@@ -231,11 +261,14 @@ $policyAssignment = New-AzPolicyAssignment `
 生成したPolicy definitionが要求するロールをJSONから取得し、Policy assignmentのidentityへ対象Resource Group scopeで割り当てます。
 
 ```powershell
+# Policy assignmentのidentityと、Policyが要求するロール一覧を取得します。
+# VMのidentityはpackage取得用、こちらのidentityはremediationによるデプロイ用です。
 $principalId = $policyAssignment.IdentityPrincipalId
 $roleDefinitionIds = @(
   $policyJson.properties.policyRule.then.details.roleDefinitionIds
 )
 
+# ロールのresource IDからGUIDを取り出し、対象Resource Groupの範囲で権限を付与します。
 foreach ($roleDefinitionId in $roleDefinitionIds) {
   $roleGuid = $roleDefinitionId.Split('/')[-1]
   New-AzRoleAssignment `
@@ -254,6 +287,8 @@ Policy割り当て前から存在するVMを再評価し、Guest Configuration A
 ```powershell
 $remediationName = "gc-rem-$($policyConfig.policyAssignmentName)"
 
+# 既存VMを再評価し、非準拠の対象へGuest Configuration Assignmentをデプロイします。
+# NoWaitは完了を待たずに戻る指定です。構成の適用結果は後続のverify.ps1で確認します。
 Start-AzPolicyRemediation `
   -Name $remediationName `
   -ResourceGroupName $resourceGroupName `
@@ -269,6 +304,7 @@ Start-AzPolicyRemediation `
 上記で設定したStorage名、URI、hashを使って検証します。
 
 ```powershell
+# Policy、Guest Configuration Assignment、packageのURIとhashなどを確認します。
 ./guest_configuration_policy/scripts/verify.ps1 `
   -ResourceGroupName $resourceGroupName `
   -VmName $vmName `
@@ -281,6 +317,7 @@ Start-AzPolicyRemediation `
 ドリフトと自動修復を確認します。
 
 ```powershell
+# 管理対象ファイルを削除してドリフトを発生させ、自動修復を確認します。
 ./guest_configuration_policy/scripts/test-drift.ps1 `
   -ResourceGroupName $resourceGroupName `
   -VmName $vmName
@@ -291,6 +328,7 @@ Start-AzPolicyRemediation `
 このスクリプトはremediation、Policy assignment、そのidentityのrole assignments、Guest Assignment、Guest Configuration Extension、Custom Policy definitionを削除します。Resource Group、VM、Storageは残ります。
 
 ```powershell
+# Policy方式で追加したリソースと権限を削除します。基盤のVMやStorageは残します。
 ./guest_configuration_policy/scripts/cleanup.ps1 `
   -ResourceGroupName $resourceGroupName `
   -VmName $vmName `
@@ -301,6 +339,7 @@ Start-AzPolicyRemediation `
 基盤も削除する場合は、Policy cleanupの完了後に実行します。
 
 ```powershell
+# Resource Group内のVM、Storage、Networkなども含め、基盤全体を削除します。
 Remove-AzResourceGroup -Name $resourceGroupName -Force
 ```
 
